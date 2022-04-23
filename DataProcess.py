@@ -590,23 +590,6 @@ class OCTA3D数据集4(Dataset):
             图像块14 = self.全部图像数据集合[item, :, :, 228:303, 76:151]
             图像块15 = self.全部图像数据集合[item, :, :, 228:303, 152:227]
             图像块16 = self.全部图像数据集合[item, :, :, 228:303, 228:303]
-
-            # 图像块1 = torch.as_tensor(图像块1, dtype=torch.uint8)
-            # 图像块2 = torch.as_tensor(图像块2, dtype=torch.uint8)
-            # 图像块3 = torch.as_tensor(图像块3, dtype=torch.uint8)
-            # 图像块4 = torch.as_tensor(图像块4, dtype=torch.uint8)
-            # 图像块5 = torch.as_tensor(图像块5, dtype=torch.uint8)
-            # 图像块6 = torch.as_tensor(图像块6, dtype=torch.uint8)
-            # 图像块7 = torch.as_tensor(图像块7, dtype=torch.uint8)
-            # 图像块8 = torch.as_tensor(图像块8, dtype=torch.uint8)
-            # 图像块9 = torch.as_tensor(图像块9, dtype=torch.uint8)
-            # 图像块10 = torch.as_tensor(图像块10, dtype=torch.uint8)
-            # 图像块11 = torch.as_tensor(图像块11, dtype=torch.uint8)
-            # 图像块12 = torch.as_tensor(图像块12, dtype=torch.uint8)
-            # 图像块13 = torch.as_tensor(图像块13, dtype=torch.uint8)
-            # 图像块14 = torch.as_tensor(图像块14, dtype=torch.uint8)
-            # 图像块15 = torch.as_tensor(图像块15, dtype=torch.uint8)
-            # 图像块16 = torch.as_tensor(图像块16, dtype=torch.uint8)
         else:
             # 6M数据的形状                      C  D    H    W
             图像块1 = self.全部图像数据集合[item, :, :, 0:75, 0:75]
@@ -625,23 +608,6 @@ class OCTA3D数据集4(Dataset):
             图像块14 = self.全部图像数据集合[item, :, :, 228:303, 76:151]
             图像块15 = self.全部图像数据集合[item, :, :, 228:303, 152:227]
             图像块16 = self.全部图像数据集合[item, :, :, 228:303, 228:303]
-
-            # 图像块1 = torch.as_tensor(图像块1, dtype=torch.uint8)
-            # 图像块2 = torch.as_tensor(图像块2, dtype=torch.uint8)
-            # 图像块3 = torch.as_tensor(图像块3, dtype=torch.uint8)
-            # 图像块4 = torch.as_tensor(图像块4, dtype=torch.uint8)
-            # 图像块5 = torch.as_tensor(图像块5, dtype=torch.uint8)
-            # 图像块6 = torch.as_tensor(图像块6, dtype=torch.uint8)
-            # 图像块7 = torch.as_tensor(图像块7, dtype=torch.uint8)
-            # 图像块8 = torch.as_tensor(图像块8, dtype=torch.uint8)
-            # 图像块9 = torch.as_tensor(图像块9, dtype=torch.uint8)
-            # 图像块10 = torch.as_tensor(图像块10, dtype=torch.uint8)
-            # 图像块11 = torch.as_tensor(图像块11, dtype=torch.uint8)
-            # 图像块12 = torch.as_tensor(图像块12, dtype=torch.uint8)
-            # 图像块13 = torch.as_tensor(图像块13, dtype=torch.uint8)
-            # 图像块14 = torch.as_tensor(图像块14, dtype=torch.uint8)
-            # 图像块15 = torch.as_tensor(图像块15, dtype=torch.uint8)
-            # 图像块16 = torch.as_tensor(图像块16, dtype=torch.uint8)
         # """
 
         # return self.迭代测试[item]
