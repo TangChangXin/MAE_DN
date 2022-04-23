@@ -25,3 +25,8 @@ class 自注意力(nn.Module):
         """
         super(自注意力, self).__init__()
         self.头数量 = 头数量 # 多头注意力的数量
+
+class MLP(nn.Module):
+    def __init__(self, 输入特征维度):
+        super(MLP, self).__init__()
+        self.输入特征维度 = 输入特征维度
