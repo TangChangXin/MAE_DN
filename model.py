@@ -1,5 +1,11 @@
 import torch
 import torch.nn as nn
+from torchsummary import summary
+
+'''
+B站论文解说：MAE中掩码的部分也是要经过处理后成为嵌入向量的？不是直接分块后遮盖住就不管的。
+'''
+
 '''
 3维图像融合成2维图像使用MAE的方式，自监督阶段也使用MAE的方式。
 3M图像256*304*304，按照16*16*16划分，共5776块，是196块的29倍；如何随机丢块。每个块大小像素点4096个，是768的5.3倍。768是三通道算出来的，4096是单通道算出来的
@@ -9,24 +15,44 @@ import torch.nn as nn
 假设换个思路，对256*304的图像编码输出1*304的向量，然后将304张图片的输出结果拼接在一起作为融合图像。但是这样似乎不算充分利用体数据。
 transformer编码器的输入似乎是768，所以
 如果图像块是16*16*16，那
+# TODO 方法2。图像块按照256*16*16划分，在256*16*16的块里随机选取某些层进行训练，输出1*16*16。
 '''
 
 
+"""
+MAE随机选择图像块应该在MAE类中实现
+"""
+class 多头自己注意力(nn.Module):
+    def __init__(self):
+        super(多头自己注意力, self).__init__()
 
-class 自注意力(nn.Module):
+
+class 图像块嵌入向量(nn.Module):
     """
-    多头注意力机制模块
+    如何将2维和3维整合在一起。3维输入的应该是
+    现在认为输入的图像都是已经划分成图像块之后的结果。有监督训练的时候在另一个类里对有标签的图像划分。
     """
-    def __init__(self, 嵌入向量的维度, 头数量):
+    def __init__(self, 图像形状, 图像块嵌入向量的维度, 标准化层=None):
         """
-
-        :param 嵌入向量的维度:
-        :param 头数量:
+        输入通道数暂时没用到，有监督训练时如何对输入的图像划分
+        3维输入数据形状BCDHW 1*2*256*16*16，在256中随机选取部分用来训练，输出1*256的向量，然后整形为1*16*16。
         """
-        super(自注意力, self).__init__()
-        self.头数量 = 头数量 # 多头注意力的数量
+        # todo 现在是3维为例
+        super(图像块嵌入向量, self).__init__()
+        self.图像形状 = 图像形状
+        self.图像块的大小 = 16
+        if 标准化层:
+            self.标准化层 = 标准化层(图像块嵌入向量的维度)
+        else: self.标准化层 = nn.Identity()
+        # self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity() 原代码
 
-class MLP(nn.Module):
-    def __init__(self, 输入特征维度):
-        super(MLP, self).__init__()
-        self.输入特征维度 = 输入特征维度
+    def forward(self, x):
+        x = torch.flatten(x, start_dim=3)
+        x = self.标准化层(x)
+        return x
+
+
+if __name__ == '__main__':
+    测试模型 = 图像块嵌入向量(1, 256, nn.LayerNorm)
+    测试模型.to(torch.device('cuda:0'))
+    summary(测试模型, input_size=(2, 256, 16, 16), batch_size=1, device='cuda')  #
