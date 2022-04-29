@@ -59,7 +59,7 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(in_c, embed_dim, kernel_size=patch_size, stride=patch_size)
         if norm_layer:
             self.norm = norm_layer(embed_dim)
-        else: nn.Identity()
+        else: self.norm = nn.Identity() # 我改成了self.norm = nn.Identity()，原来是nn.Identity()
         # self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x):
@@ -154,24 +154,26 @@ class Mlp(nn.Module):
 # transformer编码器模块，将自注意力和MLP结合起来
 class Block(nn.Module):
     def __init__(self,
-                 dim,
-                 num_heads,
-                 mlp_ratio=4.,
-                 qkv_bias=False,
-                 qk_scale=None,
-                 drop_ratio=0.,
-                 attn_drop_ratio=0.,
-                 drop_path_ratio=0.,
-                 act_layer=nn.GELU,
-                 norm_layer=nn.LayerNorm):
+                 dim, # 输入向量的特征维度
+                 num_heads, # 注意力头的数量
+                 mlp_ratio=4., # 第一个全连接层的节点是输入节点的四倍，对应768变为2304
+                 qkv_bias=False, # 是否使用偏差
+                 qk_scale=None, # 缩放因子
+                 drop_ratio=0., # 对应多头注意力模块中最后一个全连接层
+                 attn_drop_ratio=0., # qkv矩阵计算输出之后经过softmax层后的dropout
+                 drop_path_ratio=0., # 对应的编码块中droppath
+                 act_layer=nn.GELU, # 默认激活函数
+                 norm_layer=nn.LayerNorm): # 默认归一化方式
         super(Block, self).__init__()
-        self.norm1 = norm_layer(dim)
+        self.norm1 = norm_layer(dim) # 编码块中的第一个LN层
         self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
                               attn_drop_ratio=attn_drop_ratio, proj_drop_ratio=drop_ratio)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
+        # TODO 如果drop_path_ratio大于0，就采用droppath否则直接用恒等映射。
         self.drop_path = DropPath(drop_path_ratio) if drop_path_ratio > 0. else nn.Identity()
+        # 对应MLP块中最前面的的LN层
         self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
+        mlp_hidden_dim = int(dim * mlp_ratio) # MLP模块中第一个全连接层对应的隐藏层节点数量，这里相当于维度增加。
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop_ratio)
 
     def forward(self, x):
@@ -197,6 +199,7 @@ class VisionTransformer(nn.Module):
             mlp_ratio (int): ratio of mlp hidden dim to embedding dim
             qkv_bias (bool): enable bias for qkv if True
             qk_scale (float): override default qk scale of head_dim ** -0.5 if set
+            # TODO representation_size 对应最后进行分类时的MLP分类头，None表示没有
             representation_size (Optional[int]): enable and set representation layer (pre-logits) to this value if set
             distilled (bool): model includes a distillation token and head as in DeiT models
             drop_ratio (float): dropout rate
@@ -212,24 +215,27 @@ class VisionTransformer(nn.Module):
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         act_layer = act_layer or nn.GELU
 
-        # 这里没传入类“PatchEmbed”中的“norm_layer”参数
+        # 这里没传入类“PatchEmbed”中的“norm_layer”参数，我直接修改了PatchEmbed定义
         self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_c=in_c, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
         # 第一个维度的1对应的是批量
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.dist_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if distilled else None
+        # 位置嵌入是随机生成的？
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
-        self.pos_drop = nn.Dropout(p=drop_ratio)
+        self.pos_drop = nn.Dropout(p=drop_ratio) # 加上位置嵌入向量之后的drop层
 
+        # 构建了一个等差数列，保存后续transformer编码块中的drop率
         dpr = [x.item() for x in torch.linspace(0, drop_path_ratio, depth)]  # stochastic depth decay rule
+        # transformer编码块重复指定的次数
         self.blocks = nn.Sequential(*[
             Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                   drop_ratio=drop_ratio, attn_drop_ratio=attn_drop_ratio, drop_path_ratio=dpr[i],
                   norm_layer=norm_layer, act_layer=act_layer)
             for i in range(depth)
         ])
-        self.norm = norm_layer(embed_dim)
+        self.norm = norm_layer(embed_dim) # 在所有的transformer编码块之后的LN层
 
         # Representation layer
         if representation_size and not distilled:
@@ -259,11 +265,12 @@ class VisionTransformer(nn.Module):
 
     def forward_features(self, x):
         # [B, C, H, W] -> [B, num_patches, embed_dim]
-        # 报错显示下面这句
+        # 得到图像块对应的嵌入向量
         x = self.patch_embed(x)  # [B, 196, 768]
         # [1, 1, 768] -> [B, 1, 768]
         cls_token = self.cls_token.expand(x.shape[0], -1, -1)
         if self.dist_token is None:
+            # 默认情况。拼接分类嵌入向量和x
             x = torch.cat((cls_token, x), dim=1)  # [B, 197, 768]
         else:
             x = torch.cat((cls_token, self.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
@@ -272,6 +279,7 @@ class VisionTransformer(nn.Module):
 
         x = self.blocks(x)
         x = self.norm(x)
+        # 下面似乎是和具体的分类任务相关的
         if self.dist_token is None:
             return self.pre_logits(x[:, 0])
         else:
@@ -326,77 +334,10 @@ def vit_base_patch16_224_in21k(num_classes: int = 21843, has_logits: bool = True
                               num_classes=num_classes)
     return model
 
-
-def vit_base_patch32_224_in21k(num_classes: int = 21843, has_logits: bool = True):
-    """
-    ViT-Base model (ViT-B/32) from original paper (https://arxiv.org/abs/2010.11929).
-    ImageNet-21k weights @ 224x224, source https://github.com/google-research/vision_transformer.
-    weights ported from official Google JAX impl:
-    https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_patch32_224_in21k-8db57226.pth
-    """
-    model = VisionTransformer(img_size=224,
-                              patch_size=32,
-                              embed_dim=768,
-                              depth=12,
-                              num_heads=12,
-                              representation_size=768 if has_logits else None,
-                              num_classes=num_classes)
-    return model
-
-
-def vit_large_patch16_224_in21k(num_classes: int = 21843, has_logits: bool = True):
-    """
-    ViT-Large model (ViT-L/16) from original paper (https://arxiv.org/abs/2010.11929).
-    ImageNet-21k weights @ 224x224, source https://github.com/google-research/vision_transformer.
-    weights ported from official Google JAX impl:
-    https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_large_patch16_224_in21k-606da67d.pth
-    """
-    model = VisionTransformer(img_size=224,
-                              patch_size=16,
-                              embed_dim=1024,
-                              depth=24,
-                              num_heads=16,
-                              representation_size=1024 if has_logits else None,
-                              num_classes=num_classes)
-    return model
-
-
-def vit_large_patch32_224_in21k(num_classes: int = 21843, has_logits: bool = True):
-    """
-    ViT-Large model (ViT-L/32) from original paper (https://arxiv.org/abs/2010.11929).
-    ImageNet-21k weights @ 224x224, source https://github.com/google-research/vision_transformer.
-    weights ported from official Google JAX impl:
-    https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_large_patch32_224_in21k-9046d2e7.pth
-    """
-    model = VisionTransformer(img_size=224,
-                              patch_size=32,
-                              embed_dim=1024,
-                              depth=24,
-                              num_heads=16,
-                              representation_size=1024 if has_logits else None,
-                              num_classes=num_classes)
-    return model
-
-
-def vit_huge_patch14_224_in21k(num_classes: int = 21843, has_logits: bool = True):
-    """
-    ViT-Huge model (ViT-H/14) from original paper (https://arxiv.org/abs/2010.11929).
-    ImageNet-21k weights @ 224x224, source https://github.com/google-research/vision_transformer.
-    NOTE: converted weights not currently available, too large for github release hosting.
-    """
-    model = VisionTransformer(img_size=224,
-                              patch_size=14,
-                              embed_dim=1280,
-                              depth=32,
-                              num_heads=16,
-                              representation_size=1280 if has_logits else None,
-                              num_classes=num_classes)
-    return model
-
 if __name__ == '__main__':
     测试模型 = vit_base_patch16_224_in21k(10)
     硬件设备 = torch.device("cuda:0")
-    summary(测试模型, input_size=(3, 224, 224), batch_size=1, device='cpu') # , device='cpu'
+    summary(测试模型, input_size=(3, 224, 224), batch_size=1, device='cuda') # , device='cpu'
 
 
 '''
