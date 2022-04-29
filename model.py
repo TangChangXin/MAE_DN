@@ -34,6 +34,7 @@ class 图像块嵌入向量(nn.Module):
     """
     def __init__(self, 图像形状, 图像块嵌入向量的维度, 标准化层=None):
         """
+        加if分支处理3维和2维的区别
         输入通道数暂时没用到，有监督训练时如何对输入的图像划分
         3维输入数据形状BCDHW 1*2*256*16*16，在256中随机选取部分用来训练，输出1*256的向量，然后整形为1*16*16。
         """
@@ -47,12 +48,63 @@ class 图像块嵌入向量(nn.Module):
         # self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity() 原代码
 
     def forward(self, x):
-        x = torch.flatten(x, start_dim=3)
+        # 输入1*2*256*16*16，展平后1*2*256*256。形状[B, C, D, H, W] -> [B, C, D , HW]
+        # 交换维度后，1*256*256*2，形状[B, D, HW, C]
+        x = torch.flatten(x, start_dim=3).permute(0, 2, 3, 1)
+        x = torch.flatten(x, 2) # 再展平后输出1*256*512，形状[B, D, HWC]
         x = self.标准化层(x)
         return x
 
 
+class 多头注意力(nn.Module):
+    def __init__(self,
+                 嵌入向量的维度,
+                 注意力头的数量,
+                 注意力丢弃率=0.,
+                 全连接层丢弃率=0.):
+        super(多头注意力, self).__init__()
+        self.注意力头的数量 = 注意力头的数量
+        注意力头维度 = 嵌入向量的维度 // 注意力头的数量 # 每个注意力头的维度大小
+        self.缩小 = 注意力头维度 ** -0.5
+        # 通过一个全连接层生成qkv三个向量，有助于并行化计算
+        self.qkv = nn.Linear(嵌入向量的维度, 嵌入向量的维度 * 3, bias=False)
+        self.注意力丢弃 = nn.Dropout(注意力丢弃率)
+
+        # 多头注意力的输出拼接后与Wo相乘得到最终的输出。Wo矩阵通过全连接层实现
+        self.proj = nn.Linear(嵌入向量的维度, 嵌入向量的维度)
+        self.proj_drop = nn.Dropout(全连接层丢弃率)
+
+        def forward(self, x):
+            # [batch_size, num_patches + 1, embed_dim]
+            # 每一批图片数。图像块的数量加1是因为算上class token，我的方法按照纵向的深度计算           B, N, C = x.shape
+            print(x.shape)
+            B, N, C = x.shape
+
+            # qkv(): -> [batch_size, num_patches + 1, 3 * total_embed_dim]
+            # reshape: -> [batch_size, num_patches + 1, 3, num_heads, embed_dim_per_head]
+            # permute: -> [3, batch_size, num_heads, num_patches + 1, embed_dim_per_head]
+
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+
+            # [batch_size, num_heads, num_patches + 1, embed_dim_per_head]
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+
+            # transpose: -> [batch_size, num_heads, embed_dim_per_head, num_patches + 1]
+            # @: multiply -> [batch_size, num_heads, num_patches + 1, num_patches + 1]
+
+            attn = (q @ k.transpose(-2, -1)) * self.scale  # q和k进行多维矩阵乘法时，实际只有最后两个维度相乘
+            attn = attn.softmax(dim=-1)  # 似乎是二维矩阵，按行进行柔性最大值处理。
+            attn = self.attn_drop(attn)
+
+            # @: multiply -> [batch_size, num_heads, num_patches + 1, embed_dim_per_head]
+            # transpose: -> [batch_size, num_patches + 1, num_heads, embed_dim_per_head]
+            # reshape: -> [batch_size, num_patches + 1, total_embed_dim]
+            x = (attn @ v).transpose(1, 2).reshape(B, N, C)  # 和v矩阵相乘 加权求和
+            x = self.proj(x)
+            x = self.proj_drop(x)
+            return x
+
 if __name__ == '__main__':
-    测试模型 = 图像块嵌入向量(1, 256, nn.LayerNorm)
+    测试模型 = 图像块嵌入向量(1, 512, nn.LayerNorm)
     测试模型.to(torch.device('cuda:0'))
     summary(测试模型, input_size=(2, 256, 16, 16), batch_size=1, device='cuda')  #
