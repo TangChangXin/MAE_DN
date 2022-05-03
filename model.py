@@ -58,35 +58,35 @@ class DropPath(nn.Module):
         return drop_path(x, self.drop_prob, self.training)
 
 
-
 class 图像块嵌入(nn.Module):
     """
     如何将2维和3维整合在一起。3维输入的应该是
     现在认为输入的图像都是已经划分成图像块之后的结果。有监督训练的时候在另一个类里对有标签的图像划分。
     """
-    def __init__(self, 图像块嵌入向量的维度, 标准化层=None):
-    # def __init__(self, 图像形状, 图像块嵌入向量的维度, 标准化层=None):
-        """
+    def __init__(self, 图像形状, 图像块嵌入向量的维度):
+        r"""
         加if分支处理3维和2维的区别
         输入通道数暂时没用到，有监督训练时如何对输入的图像划分
         3维输入数据形状BCDHW 1*2*256*16*16，在256中随机选取部分用来训练，输出1*256的向量，然后整形为1*16*16。
+
+        :param 图像形状:
+        :param 图像块嵌入向量的维度:
         """
         # todo 现在是3维为例
         super(图像块嵌入, self).__init__()
-        # self.图像形状 = 图像形状
+        self.图像形状 = 图像形状
         self.图像块的大小 = 16
         self.图像块数量 = 256 # TODO 注意修改
-        if 标准化层:
-            self.标准化层 = 标准化层(图像块嵌入向量的维度)
-        else: self.标准化层 = nn.Identity()
+        self.标准化 = nn.LayerNorm(图像块嵌入向量的维度)
         # self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity() 原代码
 
     def forward(self, x):
-        # 输入1*2*256*16*16，展平后1*2*256*256。形状[B, C, D, H, W] -> [B, C, D , HW]
-        # 交换维度后，1*256*256*2，形状[B, D, HW, C]
+        print("输入数据的形状", x.shape)
+        # 输入1*2*256*16*16，展平后1*2*256*256。形状[B, C, D, H, W] -> [B, C, D , HW].交换维度后，1*256*256*2，形状[B, D, HW, C]
         x = torch.flatten(x, start_dim=3).permute(0, 2, 3, 1)
-        x = torch.flatten(x, 2) # 再展平后输出1*256*512，形状[B, D, HWC]
-        x = self.标准化层(x)
+        # 再展平后输出1*256*512，形状[B, D, HWC]
+        x = torch.flatten(x, 2)
+        x = self.标准化(x)
         return x
 
 
@@ -115,8 +115,6 @@ class 自注意力(nn.Module):
         self.线性投影丢弃 = nn.Dropout(全连接层丢弃率)
 
     def forward(self, x):
-        print('\n')
-        print(x)
         print("输入数据的形状", x.shape)
         批量大小, 图像块数量, 嵌入向量维度 = x.shape
         # TODO 我不分类需要分类信息嵌入向量吗？
@@ -185,18 +183,18 @@ class 编码块(nn.Module):
                  激活函数=nn.GELU, # 默认激活函数
                  标准化=nn.LayerNorm): # 默认归一化方式
         super(编码块, self).__init__()
-        self.标准化层1 = 标准化(特征维度) # 编码块中的第一个LN层
+        self.标准化1 = 标准化(特征维度) # 编码块中的第一个LN层
         self.多头自注意力 = 自注意力(特征维度, 注意力头数量=注意力头数量, qkv_偏差=qkv_偏差, qkv_缩小因子=qkv_缩小因子, 自注意力丢弃率=自注意力丢弃率, 全连接层丢弃率=全连接层丢弃率)
         # TODO 如果drop_path_ratio大于0，就采用droppath否则直接用恒等映射。作者认为droppath比dropout效果好
         self.drop_path = DropPath(drop_path_ratio) if drop_path_ratio > 0. else nn.Identity()
         # 对应MLP块中最前面的的LN层
-        self.标准化层2 = 标准化(特征维度)
+        self.标准化2 = 标准化(特征维度)
         隐藏层维度 = int(特征维度 * 多层感知机扩增率) # MLP模块中第一个全连接层对应的隐藏层节点数量，这里相当于维度增加。
         self.多层感知机 = 多层感知机(输入大小=特征维度, 隐藏层大小=隐藏层维度, 激活函数=激活函数, 丢弃率=全连接层丢弃率)
 
     def forward(self, x):
-        x = x + self.drop_path(self.多头自注意力(self.标准化层1(x)))
-        x = x + self.drop_path(self.多层感知机(self.标准化层2(x)))
+        x = x + self.drop_path(self.多头自注意力(self.标准化1(x)))
+        x = x + self.drop_path(self.多层感知机(self.标准化2(x)))
         return x
 
 
@@ -249,7 +247,7 @@ class 融合网络(nn.Module):
         self.num_tokens = 2 if distilled else 1
         标准化 = 标准化 or partial(nn.LayerNorm, eps=1e-6)
         激活函数 = 激活函数 or nn.GELU
-        self.图像块嵌入向量 = 图像嵌入层(图像块嵌入向量的维度=嵌入向量维度)
+        self.图像块嵌入向量 = 图像嵌入层(图像形状=304, 图像块嵌入向量的维度=嵌入向量维度)
         图像块数量 = self.图像块嵌入向量.图像块数量
 
         # 第一个维度的1对应的是批量
@@ -257,6 +255,7 @@ class 融合网络(nn.Module):
         self.dist_token = nn.Parameter(torch.zeros(1, 1, 嵌入向量维度)) if distilled else None
         # 位置嵌入是随机生成的？
         # TODO
+        # self.位置嵌入向量 = nn.Parameter(torch.zeros(1, 图像块数量 + self.num_tokens, 嵌入向量维度))
         self.位置嵌入向量 = nn.Parameter(torch.zeros(1, 图像块数量 + self.num_tokens, 嵌入向量维度))
         self.位置嵌入丢弃 = nn.Dropout(p=全连接丢弃率) # 加上位置嵌入向量之后的drop层
 
@@ -271,6 +270,7 @@ class 融合网络(nn.Module):
         ])
         self.融合输出 = 编码块(特征维度=嵌入向量维度, 注意力头数量=注意力头数量, 多层感知机扩增率=多层感知机扩增率, qkv_偏差=qkv_偏差,
             qkv_缩小因子=qkv_缩小因子, 自注意力丢弃率=自注意力丢弃率, 全连接层丢弃率=全连接丢弃率, drop_path_ratio=丢弃率[-1])
+        # 修改最后一个编码块的输出大小
         self.融合输出.多层感知机 = 多层感知机(输入大小=嵌入向量维度, 隐藏层大小=嵌入向量维度, 输出大小=200, 激活函数=激活函数, 丢弃率=全连接丢弃率)
 
         # TODO 我修改了输出大小，那么最后一个LN层的维度应该不是“嵌入向量维度”
@@ -369,19 +369,28 @@ def 权重初始化(模块):
 
 # '''
 if __name__ == '__main__':
-    # 测试模型 = 图像块嵌入(512, 8, 0.2, 0.2)
+    # 测试模型 = 图像块嵌入(304, 512)
     # 测试模型.to(torch.device('cuda:0'))
-    # summary(测试模型, input_size=(2, 256, 16, 16), batch_size=1, device='cuda')
+    # print('\n')
+    # summary(测试模型, input_size=(2, 256, 16, 16), batch_size=3, device='cuda')
 
     # 测试模型 = 自注意力(嵌入向量维度=512, 注意力头数量=8, 自注意力丢弃率=0.2, 全连接层丢弃率=0.2)
     # 测试模型.to(torch.device('cuda:0'))
-    # summary(测试模型, input_size=(256,512), batch_size=1, device='cuda')
+    # print('\n')
+    # summary(测试模型, input_size=(256,512), batch_size=3, device='cuda')
 
-    # 测试模型 = 编码块(特征维度=512, 注意力头数量=8, 自注意力丢弃率=0.2, 全连接层丢弃率=0.2, drop_path_ratio=0.2)
+    # 测试模型 = 多层感知机(512, 2048, 200, 丢弃率=0.2)
     # 测试模型.to(torch.device('cuda:0'))
-    # summary(测试模型, input_size=(256,512), batch_size=7, device='cuda')
+    # print('\n')
+    # summary(测试模型, input_size=(256,512), batch_size=3, device='cuda')
 
-    测试模型 = 融合网络()
+    测试模型 = 编码块(特征维度=512, 注意力头数量=8, 自注意力丢弃率=0.2, 全连接层丢弃率=0.2, drop_path_ratio=0.2)
     测试模型.to(torch.device('cuda:0'))
-    summary(测试模型, input_size=(2, 256, 16, 16), batch_size=1, device='cuda')
+    print('\n')
+    summary(测试模型, input_size=(256,512), batch_size=3, device='cuda')
+
+    # 测试模型 = 融合网络()
+    # 测试模型.to(torch.device('cuda:0'))
+    # print('\n')
+    # summary(测试模型, input_size=(2, 256, 16, 16), batch_size=1, device='cuda')
 # '''
