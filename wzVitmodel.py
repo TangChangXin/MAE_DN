@@ -46,7 +46,7 @@ class PatchEmbed(nn.Module):
     将一张2D图像划分成多个图像块，这个过程实际是卷积实现的。之后将每个图像块映射成一维向量，作为transformer的真正输入
     """
     # TODO norm_layer本来是None，我改成了nn.LayerNorm
-    def __init__(self, img_size=224, patch_size=16, in_c=3, embed_dim=768, norm_layer=nn.LayerNorm):
+    def __init__(self, img_size=224, patch_size=16, in_c=3, embed_dim=768, norm_layer=None):
         super().__init__()
         img_size = (img_size, img_size)
         patch_size = (patch_size, patch_size)
@@ -101,6 +101,7 @@ class Attention(nn.Module):
     def forward(self, x):
         # [batch_size, num_patches + 1, total_embed_dim]
         # 每一批图片数，加1是因为class token， 对应768
+        print(x.shape)
         B, N, C = x.shape
 
         # qkv(): -> [batch_size, num_patches + 1, 3 * total_embed_dim]
@@ -235,6 +236,7 @@ class VisionTransformer(nn.Module):
                   norm_layer=norm_layer, act_layer=act_layer)
             for i in range(depth)
         ])
+
         self.norm = norm_layer(embed_dim) # 在所有的transformer编码块之后的LN层
 
         # Representation layer
@@ -247,10 +249,10 @@ class VisionTransformer(nn.Module):
             ]))
         else:
             self.has_logits = False
-            self.pre_logits = nn.Identity()
+            self.pre_logits = nn.Identity() # 不使用pre_logits层
 
         # Classifier head(s)
-        self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity() # 最后一个全连接层
         self.head_dist = None
         if distilled:
             self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if num_classes > 0 else nn.Identity()
@@ -278,7 +280,8 @@ class VisionTransformer(nn.Module):
         x = self.pos_drop(x + self.pos_embed) # 加上位置嵌入信息，准备输入transformer编码器
 
         x = self.blocks(x)
-        x = self.norm(x)
+        x = self.norm(x) # 输出[1, 197, 768]
+
         # 下面似乎是和具体的分类任务相关的
         if self.dist_token is None:
             return self.pre_logits(x[:, 0])
@@ -288,7 +291,9 @@ class VisionTransformer(nn.Module):
     # 下面计算中出错
     def forward(self, x):
         x = self.forward_features(x)
+        print(x.shape)
         if self.head_dist is not None:
+            print('head_dist')
             x, x_dist = self.head(x[0]), self.head_dist(x[1])
             if self.training and not torch.jit.is_scripting():
                 # during inference, return the average of both classifier predictions
@@ -296,6 +301,7 @@ class VisionTransformer(nn.Module):
             else:
                 return (x + x_dist) / 2
         else:
+            print('head_dist是none')
             x = self.head(x)
         return x
 
@@ -336,9 +342,12 @@ def vit_base_patch16_224_in21k(num_classes: int = 21843, has_logits: bool = True
 
 if __name__ == '__main__':
     测试模型 = vit_base_patch16_224_in21k(10)
-    硬件设备 = torch.device("cuda:0")
-    summary(测试模型, input_size=(3, 224, 224), batch_size=1, device='cuda') # , device='cpu'
+    测试模型.to(torch.device("cuda:0"))
+    summary(测试模型, input_size=(3, 224, 224), batch_size=3, device='cuda')
 
+    # 测试模型 = PatchEmbed()
+    # 测试模型.to(torch.device("cuda:0"))
+    # summary(测试模型, input_size=(3, 224, 224), batch_size=3, device='cuda')
 
 '''
         Layer (type)               Output Shape         Param #
@@ -363,12 +372,14 @@ if __name__ == '__main__':
               Mlp-18              [1, 197, 768]               0
          Identity-19              [1, 197, 768]               0
             Block-20              [1, 197, 768]               0
+            
         LayerNorm-21              [1, 197, 768]           1,536
            Linear-22             [1, 197, 2304]       1,771,776
           Dropout-23          [1, 12, 197, 197]               0
            Linear-24              [1, 197, 768]         590,592
           Dropout-25              [1, 197, 768]               0
         Attention-26              [1, 197, 768]               0
+        
          Identity-27              [1, 197, 768]               0
         LayerNorm-28              [1, 197, 768]           1,536
            Linear-29             [1, 197, 3072]       2,362,368
@@ -377,8 +388,10 @@ if __name__ == '__main__':
            Linear-32              [1, 197, 768]       2,360,064
           Dropout-33              [1, 197, 768]               0
               Mlp-34              [1, 197, 768]               0
+              
          Identity-35              [1, 197, 768]               0
             Block-36              [1, 197, 768]               0
+            
         LayerNorm-37              [1, 197, 768]           1,536
            Linear-38             [1, 197, 2304]       1,771,776
           Dropout-39          [1, 12, 197, 197]               0
@@ -539,9 +552,12 @@ if __name__ == '__main__':
              Mlp-194              [1, 197, 768]               0
         Identity-195              [1, 197, 768]               0
            Block-196              [1, 197, 768]               0
-       LayerNorm-197              [1, 197, 768]           1,536
+           
+       LayerNorm-197              [1, 197, 768]           1,536 所有transformer编码块之后的LN层
+       
           Linear-198                   [1, 768]         590,592
             Tanh-199                   [1, 768]               0
+            
           Linear-200                    [1, 10]           7,690
 ================================================================
 Total params: 86,246,410
