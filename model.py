@@ -3,6 +3,7 @@ import torch.nn as nn
 from functools import partial
 from collections import OrderedDict
 from torchsummary import summary
+from tensorboardX import SummaryWriter
 
 '''
 B站论文解说：MAE中掩码的部分也是要经过处理后成为嵌入向量的？不是直接分块后遮盖住就不管的。
@@ -116,7 +117,6 @@ class 自注意力(nn.Module):
 
     def forward(self, x):
         批量大小, 图像块数量, 嵌入向量维度 = x.shape
-        # TODO 我不分类需要分类信息嵌入向量吗？
         # [batch_size, num_patches + 1, embed_dim] 每一批图片数。图像块的数量加1是因为算上class token，我的方法按照纵向的深度计算
         # qkv(): -> [批量大小, 图像块数量 + 1, 3 * 嵌入向量维度] 我不分类可能不加分类嵌入向量。
         # 3对应qkv三个向量。后面两个维度的数据可以理解为将嵌入向量按照注意力头的数量平均划分之后分别送入不同的注意力头中计算
@@ -199,6 +199,71 @@ class 编码块(nn.Module):
     def forward(self, x):
         x = x + self.drop_path(self.多头自注意力(self.标准化1(x)))
         x = x + self.drop_path(self.多层感知机(self.标准化2(x))) # 不能从这里直接修改多层感知机的输出维度，因为要和原输入x相加
+        return x
+
+
+class 融合网络无cls(nn.Module):
+    def __init__(self, 图像大小=224, 图像块大小=16, 输入通道数=3, 嵌入向量维度=512, 深度=12, 注意力头数量=8, 多层感知机扩增率=4.0,
+                 qkv_偏差=True, qk_缩小因子=None, 全连接丢弃率=0., 自注意力丢弃率=0., drop_path_ratio=0., 图像嵌入层=图像块嵌入, 标准化=None,):
+        """
+
+        :param 图像大小:
+        :param 图像块大小:
+        :param 输入通道数: 卷积生成图像块时用到
+        :param 嵌入向量维度: (int) 大小为图像块的宽度乘高度再乘2。也可以自己通过卷积输出通道数来指定。
+        :param 深度: transformer编码器重复的次数。
+        :param 注意力头数量: (int): 必须是嵌入向量维度的因数。
+        :param 多层感知机扩增率: (int): 多层感知机模块中第一个全连接层的隐藏层节点数目和嵌入向量维度的比值
+        :param qkv_偏差:
+        :param qk_缩小因子:
+        :param 全连接丢弃率:
+        :param 自注意力丢弃率: 多头自注意力中输出经过softmax层之后的dropout层的丢弃率。
+        :param drop_path_ratio:
+        :param 图像嵌入层: (nn.Module): 将图像划分成若干块之后生成嵌入向量
+        :param 标准化:
+        """
+        super(融合网络无cls, self).__init__()
+        self.num_features = 嵌入向量维度  # num_features for consistency with other models
+        标准化 = 标准化 or partial(nn.LayerNorm, eps=1e-6)
+        self.图像块嵌入向量 = 图像嵌入层(图像形状=304, 图像块嵌入向量的维度=嵌入向量维度)
+        图像块数量 = self.图像块嵌入向量.图像块数量
+
+        # 第一个维度的1对应的是批量
+        self.位置嵌入向量 = nn.Parameter(torch.zeros(1, 图像块数量, 嵌入向量维度))
+        self.位置嵌入丢弃 = nn.Dropout(p=全连接丢弃率) # 加上位置嵌入向量之后的drop层
+
+        # 构建了一个等差数列，保存后续transformer编码块中的drop率。最后一个transformer编码块需要令输出形状为1*256，方便调整为16*16
+        丢弃率 = [x.item() for x in torch.linspace(0, drop_path_ratio, 深度)]  # stochastic depth decay rule
+        # transformer编码块重复指定的次数
+        self.编码块堆叠 = nn.Sequential(*[
+            编码块(特征维度=嵌入向量维度, 注意力头数量=注意力头数量, 多层感知机扩增率=多层感知机扩增率, qkv_偏差=qkv_偏差, qk_缩小因子=qk_缩小因子,
+                自注意力丢弃率=自注意力丢弃率, 全连接层丢弃率=全连接丢弃率, drop_path_ratio=丢弃率[i], 标准化=标准化)
+            for i in range(深度)
+        ])
+        self.标准化 = 标准化(嵌入向量维度) # 在所有的transformer编码块之后的LN层。输出形状[1, 256， 512]
+        self.通道融合 = nn.Linear(嵌入向量维度, 256) # 输出形状[1, 256， 256]
+        self.激活函数 = nn.GELU()
+        # TODO 这里可能需要修改
+        self.特征降维 = nn.Linear(256, 1) # pytorch如何对指定维度的信息进行融合
+
+        # 权重初始化
+        nn.init.trunc_normal_(self.位置嵌入向量, std=0.02)
+        self.apply(权重初始化)
+
+    def forward(self, x):
+        # [B, C, D, H, W] -> [批量, 图像块数量, 嵌入向量维度] 我的图像深度相当于图像块数量
+        # 得到图像块对应的嵌入向量
+        x = self.图像块嵌入向量(x)  # 输出形状[B, 256, 512]
+        # 这里报错说明实际输入的嵌入向量维度和参数传入的嵌入向量维度大小不一致。
+        x = self.位置嵌入丢弃(x + self.位置嵌入向量) # 加上位置嵌入信息，准备输入transformer编码器
+        x = self.编码块堆叠(x)
+        x = self.标准化(x) # 输出形状[1, 512， 256]
+        x = self.通道融合(x) # 输出形状[1, 256， 256]
+        x = self.激活函数(x)
+        x = torch.transpose(x, 1, 2)
+        x = self.特征降维(x) # 输出形状[1, 256， 1]
+        x = torch.reshape(x, (-1, 16, 16)) # 输出形状[批量, 16, 16]
+        # print(x.shape)
         return x
 
 
@@ -335,6 +400,18 @@ class 融合网络(nn.Module):
     """
 
 
+
+class 自监督重建OCTA图像(nn.Module):
+    """
+    现在考虑传进来的数据是已经划分块之后的结果
+    """
+    def __init__(self):
+        super(自监督重建OCTA图像, self).__init__()
+
+
+
+
+
 def 权重初始化(模块):
     """
     ViT 权重初始化
@@ -374,8 +451,18 @@ if __name__ == '__main__':
     # print('\n')
     # summary(测试模型, input_size=(256,512), batch_size=3, device='cuda') # [3, 256, 512]
 
-    测试模型 = 融合网络()
+    # 测试模型 = 融合网络()
+    # 测试模型.to(torch.device('cuda:0'))
+    # print('\n')
+    # summary(测试模型, input_size=(2, 256, 16, 16), batch_size=3, device='cuda')
+
+    测试模型 = 融合网络无cls() # 输出[3, 256, 512]
     测试模型.to(torch.device('cuda:0'))
     print('\n')
-    summary(测试模型, input_size=(2, 256, 16, 16), batch_size=3, device='cuda')
+    summary(测试模型, input_size=(2, 256, 16, 16), batch_size=1, device='cuda')
+
+    # print(测试模型)
+
+    # with SummaryWriter(comment='测试模型') as 可视化:
+    #     可视化.add_graph(测试模型, torch.randn(1, 2, 256, 16, 16))
 # '''
