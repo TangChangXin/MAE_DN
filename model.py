@@ -492,7 +492,7 @@ class MaskedAutoencoderViT(nn.Module):
         super().__init__()
 
         # --------------------------------------------------------------------------
-        # MAE encoder specifics
+        # MAE编码器实现
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
 
@@ -507,7 +507,7 @@ class MaskedAutoencoderViT(nn.Module):
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
-        # MAE decoder specifics
+        # MAE解码器实现
         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
 
         # 替换被遮掩的图像块
@@ -564,8 +564,8 @@ class MaskedAutoencoderViT(nn.Module):
     # 将图片划分成块
     def patchify(self, imgs):
         """
-        imgs: (N, 3, H, W)
-        x: (N, L, patch_size**2 *3)
+        imgs: (批量, 3, H, W)
+        x: (批量, L, patch_size**2 *3)
         """
         p = self.patch_embed.patch_size[0]
         assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
@@ -576,11 +576,11 @@ class MaskedAutoencoderViT(nn.Module):
         x = x.reshape(shape=(imgs.shape[0], h * w, p ** 2 * 3))
         return x
 
-    #
+    # 将图像块还原成完整的图像
     def unpatchify(self, x):
         """
-        x: (N, L, patch_size**2 *3)
-        imgs: (N, 3, H, W)
+        x: (批量, L, patch_size**2 *3)
+        imgs: (批量, 3, H, W)
         """
         p = self.patch_embed.patch_size[0]
         h = w = int(x.shape[1] ** .5)
@@ -592,17 +592,16 @@ class MaskedAutoencoderViT(nn.Module):
         return imgs
 
     # TODO 随机掩码函数，很重要
-    def random_masking(self, x, mask_ratio):
+    def 随机掩码(self, x, 掩码率):
         """
         Perform per-sample random masking by per-sample shuffling.
         Per-sample shuffling is done by argsort random noise.
-        x: [N, L, D], sequence
+        x: [批量, L, 嵌入向量维度], sequence
         """
-        N, L, D = x.shape  # batch, length, dim
-        len_keep = int(L * (1 - mask_ratio))
 
-        # 二维随机噪声矩阵
-        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        批量, 块数量, 嵌入向量维度 = x.shape  # 获取输入数据的形状，批量, 块数量, 维度
+        保留块数量 = int(块数量 * (1 - 掩码率))
+        noise = torch.rand(批量, 块数量, device=x.device)  # 二维随机噪声矩阵，数值在[0, 1]
 
         # sort noise for each sample。argsort()返回的是元素对应的索引
         # ids_shuffle是用来选择哪些元素做掩码
@@ -611,27 +610,28 @@ class MaskedAutoencoderViT(nn.Module):
         ids_restore = torch.argsort(ids_shuffle, dim=1) # 对上一步得到的索引排序
 
         # keep the first subset
-        ids_keep = ids_shuffle[:, :len_keep]
-        #
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+        ids_keep = ids_shuffle[:, :保留块数量]
+        # 没有被掩码的图像块序列？
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, 嵌入向量维度))
 
         # generate the binary mask: 0 is keep, 1 is remove
         #
-        mask = torch.ones([N, L], device=x.device)
-        mask[:, :len_keep] = 0
+        mask = torch.ones([批量, 块数量], device=x.device)
+        mask[:, :保留块数量] = 0
         # unshuffle to get the binary mask
         mask = torch.gather(mask, dim=1, index=ids_restore)
         return x_masked, mask, ids_restore
 
-    def forward_encoder(self, x, mask_ratio):
+    def forward_encoder(self, x, 掩码率):
         # embed patches
-        x = self.patch_embed(x)
+        x = self.patch_embed(x) # 得到嵌入向量
 
         # add pos embed w/o cls token
-        x = x + self.pos_embed[:, 1:, :]
+        x = x + self.pos_embed[:, 1:, :] # 从1开始是因为0对应cls_token，但是当前还加上去
 
-        # masking: length -> length * mask_ratio
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        # masking: length -> length * 掩码率。
+        # TODO 关键操作
+        x, mask, ids_restore = self.随机掩码(x, 掩码率)
 
         # append cls token
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
@@ -673,9 +673,9 @@ class MaskedAutoencoderViT(nn.Module):
 
     def forward_loss(self, imgs, pred, mask):
         """
-        imgs: [N, 3, H, W]
-        pred: [N, L, p*p*3]
-        mask: [N, L], 0 is keep, 1 is remove,
+        imgs: [批量, 3, H, W]
+        pred: [批量, L, p*p*3]
+        mask: [批量, L], 0 is keep, 1 is remove,
         """
         target = self.patchify(imgs)
         if self.norm_pix_loss:
@@ -684,14 +684,14 @@ class MaskedAutoencoderViT(nn.Module):
             target = (target - mean) / (var + 1.e-6) ** .5
 
         loss = (pred - target) ** 2
-        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+        loss = loss.mean(dim=-1)  # [批量, L], mean loss per patch
 
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
-    def forward(self, imgs, mask_ratio=0.75):
-        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+    def forward(self, imgs, 掩码率=0.75):
+        latent, mask, ids_restore = self.forward_encoder(imgs, 掩码率)
+        pred = self.forward_decoder(latent, ids_restore)  # [批量, L, p*p*3]
         loss = self.forward_loss(imgs, pred, mask)
         return loss, pred, mask
 
