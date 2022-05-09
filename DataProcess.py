@@ -328,7 +328,6 @@ class 低显存OCTA3D数据集(Dataset):
             return self.划分立体图像(item, self.全部图像数据集合)
         else:
             with h5py.File(os.path.join(self.保存路径, self.图像数据集合名称 + '.hdf5'), "r") as 数据集合文件:
-                print('打开文件了')
                 self.全部图像数据集合 = 数据集合文件[self.图像数据集合名称]
                 return self.划分立体图像(item, self.全部图像数据集合)
 
