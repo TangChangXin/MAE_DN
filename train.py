@@ -42,7 +42,7 @@ np.random.seed(全部随机数种子)
 os.environ['PYTHONHASHSEED'] = str(全部随机数种子)  # 禁止哈希随机化，使实验可复现
 
 # 设置训练使用的设备
-'''
+# '''
 if torch.cuda.is_available():
     硬件设备 = torch.device("cuda:0")
     # 保证每次返回的卷积算法将是确定的，如果配合上设置 Torch 的随机种子为固定值的话，应该可以保证每次运行网络的时候相同输入的输出是固定的。
@@ -50,8 +50,8 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = False  # 为每层搜索适合的卷积算法实现，加速计算
 else:
     硬件设备 = torch.device("cpu")
-'''
-硬件设备 = torch.device("cpu")
+# '''
+# 硬件设备 = torch.device("cpu")
 print("训练使用设备", 硬件设备)
 
 def 训练模型(网络模型, 优化器, 硬件设备, 命令行参数):
