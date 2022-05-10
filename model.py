@@ -475,20 +475,20 @@ class 自监督重建OCTA图像(nn.Module):
             for i in range(解码器深度)])
 
         self.解码器标准化 = 标准化(解码器嵌入向量维度)
-        self.decoder_pred = nn.Linear(解码器嵌入向量维度, patch_size ** 2 * in_chans, bias=True)  # decoder to patch
+        self.解码器预测值 = nn.Linear(解码器嵌入向量维度, 图像块数量 ** 2, bias=True)  # decoder to patch
         # --------------------------------------------------------------------------
 
         self.norm_pix_loss = norm_pix_loss
 
         self.初始化权重()
 
-    def initialize_weights(self):
+    def 初始化权重(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
         # 编码器的位置嵌入
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches ** .5),
+        位置嵌入向量 = get_2d_sincos_pos_embed(self.位置嵌入向量.shape[-1], int(self.patch_embed.num_patches ** .5),
                                             cls_token=True)
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+        self.位置嵌入向量.data.copy_(torch.from_numpy(位置嵌入向量).float().unsqueeze(0))
 
         decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1],
                                                     int(self.patch_embed.num_patches ** .5), cls_token=True)
