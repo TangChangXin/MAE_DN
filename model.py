@@ -480,32 +480,29 @@ class 自监督重建OCTA图像(nn.Module):
 
         self.norm_pix_loss = norm_pix_loss
 
-        self.初始化权重()
-
-    def 初始化权重(self):
-        # initialization
-        # initialize (and freeze) pos_embed by sin-cos embedding
+        # 初始化 (and freeze) pos_embed by sin-cos embedding
         # 编码器的位置嵌入
-        位置嵌入向量 = get_2d_sincos_pos_embed(self.位置嵌入向量.shape[-1], int(self.patch_embed.num_patches ** .5),
+        位置嵌入向量 = get_2d_sincos_pos_embed(self.位置嵌入向量.shape[-1], int(self.图像块嵌入向量.图像块数量 ** .5),
                                             cls_token=True)
         self.位置嵌入向量.data.copy_(torch.from_numpy(位置嵌入向量).float().unsqueeze(0))
 
-        decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1],
-                                                    int(self.patch_embed.num_patches ** .5), cls_token=True)
-        self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
+        解码器位置嵌入向量 = get_2d_sincos_pos_embed(self.解码器位置嵌入向量.shape[-1],
+                                                    int(self.图像块嵌入向量.图像块数量 ** .5), cls_token=True)
+        self.解码器位置嵌入向量.data.copy_(torch.from_numpy(解码器位置嵌入向量).float().unsqueeze(0))
 
+        # TODO 如果在生成图像块嵌入向量的时候使用卷积操作才用到这个初始化操作
         # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
-        w = self.patch_embed.proj.weight.data
-        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        # 权重 = self.图像块嵌入向量.proj.weight.data
+        # torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
-        torch.nn.init.normal_(self.cls_token, std=.02)
+        # torch.nn.init.normal_(self.cls_token, std=.02)
         torch.nn.init.normal_(self.mask_token, std=.02)
 
         # initialize nn.Linear and nn.LayerNorm
-        self.apply(self._init_weights)
+        self.apply(self.初始化权重)
 
-    def _init_weights(self, m):
+    def 初始化权重(self, m):
         if isinstance(m, nn.Linear):
             torch.nn.init.xavier_uniform_(m.weight)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -928,7 +925,7 @@ class 掩码自编码器Vit(nn.Module):
 
 
 def mae_vit_base_patch16_dec512d8b(**kwargs):
-    model = 掩码自编码器(
+    model = 掩码自编码器Vit(
         patch_size=16, embed_dim=768, depth=12, num_heads=12,
         decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
