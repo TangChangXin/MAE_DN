@@ -141,7 +141,7 @@ class OCTA3D数据集_未关闭(Dataset):
             for y起点 in range(0, self.立体数据尺寸[1], self.块尺寸[1]):
                 for x起点 in range(0, self.立体数据尺寸[1], self.块尺寸[1]):
                     # 图像块形状[2, 256, 16, 16]
-                    图像块 = self.全部图像数据集合[item, :, :, y起点:y起点 + 16, x起点:x起点 + 16].astype(np.float32)
+                    图像块 = self.全部图像数据集合[item, :, :, y起点:y起点 + 16, x起点:x起点 + 16]
                     图像块列表.append(图像块)
         return 图像块列表
 
@@ -210,7 +210,7 @@ class 低显存OCTA3D数据集(Dataset):
             for y起点 in range(0, self.立体数据尺寸[1], self.块尺寸[1]):
                 for x起点 in range(0, self.立体数据尺寸[1], self.块尺寸[1]):
                     # 位置 += 1
-                    图像块 = 立体图像数据[病人索引, :, :, y起点:y起点 + 16, x起点:x起点 + 16].astype(np.float32)
+                    图像块 = 立体图像数据[病人索引, :, :, y起点:y起点 + 16, x起点:x起点 + 16]
                     图像块列表.append(图像块)
 
         return 图像块列表
