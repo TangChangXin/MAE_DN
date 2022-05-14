@@ -504,7 +504,8 @@ class 直接自监督重建OCTA图像(nn.Module):
             for i in range(解码器深度)])
 
         self.解码器标准化 = 标准化(解码器嵌入向量维度)
-        self.解码器预测值 = nn.Linear(解码器嵌入向量维度, 图像块数量 ** 2, bias=True)  # decoder to patch
+        # 这个就是输出时的最后一层了
+        self.解码器预测值 = nn.Linear(解码器嵌入向量维度, 图像块大小 ** 2, bias=True)  # decoder to patch
         # --------------------------------------------------------------------------
 
         self.norm_pix_loss = norm_pix_loss
@@ -542,10 +543,12 @@ class 直接自监督重建OCTA图像(nn.Module):
 
     # 将图片划分成块，计算损失函数的时候用到，我现在已经就是块了所以不需要
     def patchify(self, imgs):
+
         """
         vit中切分patch调整数据维度的操作
         imgs: (批量, 3, H, W)
         x: (批量, L, patch_size**2 *3)
+        """
         """
         块大小 = self.图像块嵌入向量.图像块的大小 # 每个patch的长宽
         assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % 块大小 == 0
@@ -555,8 +558,12 @@ class 直接自监督重建OCTA图像(nn.Module):
         x = imgs.reshape(shape=(imgs.shape[0], 3, 高度数量, 块大小, 宽度数量, 块大小))
         # batchsize，通道数，patch每一边的数量，每个patch的宽高，patch每一边的数量，每个patch的长宽
         x = torch.einsum('nchpwq->nhwpqc', x)
-        x = x.reshape(shape=(imgs.shape[0], 高度数量 * 宽度数量, 块大小 ** 2 * 3))
+        x = x.reshape(shape=(imgs.shape[0], 高度数量 * 宽度数量, 块大小 ** 2 * 3)) # 
         # 其实直接转换过来就行， （batchsize，patch总数base=196，path平方x通道数也就是每个patch块内的数据）
+        """
+        x = torch.flatten(imgs, start_dim=2)
+        # print(x.shape)
+
         return x
 
     # 将图像块还原成完整的图像
@@ -575,7 +582,6 @@ class 直接自监督重建OCTA图像(nn.Module):
         # （batchsize，patch总数base=196，path平方x通道数也就是每个patch块内的数据）->（图像宽高，通道数，hxp=patch[0]xp的宽高）
         return imgs
 
-    # TODO 随机掩码函数，很重要
     def 随机掩码(self, x, 掩码率):
         """
         Perform per-sample random masking by per-sample shuffling.
@@ -615,7 +621,6 @@ class 直接自监督重建OCTA图像(nn.Module):
         x = x + self.位置嵌入向量[:, 1:, :] # 从1开始是因为0对应cls_token
 
         # masking: length -> length * 掩码率。
-        # TODO 关键操作
         x, mask, ids_restore = self.随机掩码(x, 掩码率)
 
         # 添加分类嵌入向量
@@ -629,28 +634,22 @@ class 直接自监督重建OCTA图像(nn.Module):
         return x, mask, ids_restore
 
     def forward_decoder(self, x, ids_restore):
-        # embed tokens
-        x = self.decoder_embed(x)
+        # 编码器的输出转化为解码器的输入嵌入向量
+        x = self.解码嵌入(x)
 
-        # append mask tokens to sequence
+        # 加上被掩码的图像
         mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
         x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)  # no cls token
         x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
         x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token
 
-        # add pos embed
-        x = x + self.decoder_pos_embed
+        # 添加解码器位置嵌入向量
+        x = x + self.解码器位置嵌入向量
+        x = self.解码块堆叠(x)
+        x = self.解码器标准化(x)
+        x = self.解码器预测值(x)
 
-        # apply Transformer blocks
-        for blk in self.decoder_blocks:
-            x = blk(x)
-        x = self.decoder_norm(x)
-
-        # predictor projection
-        x = self.decoder_pred(x)
-
-        # remove cls token
-        x = x[:, 1:, :]
+        x = x[:, 1:, :] # 取出没有分类嵌入向量的部分形状[批量, 361, 256]
 
         return x
 
@@ -660,12 +659,17 @@ class 直接自监督重建OCTA图像(nn.Module):
         pred: [批量, L, p*p*3]
         mask: [批量, L], 0 is keep, 1 is remove,
         """
+
         target = self.patchify(imgs)
+
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6) ** .5
 
+        # pred和target维度不一致
+        # print('target形状', target.shape)
+        # print('pred形状', pred.shape)
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [批量, L], mean loss per patch
 
@@ -677,6 +681,7 @@ class 直接自监督重建OCTA图像(nn.Module):
         latent, mask, ids_restore = self.forward_encoder(imgs, 掩码率)
         pred = self.forward_decoder(latent, ids_restore)  # [批量, L, p*p*3]
         loss = self.forward_loss(imgs, pred, mask)
+        # return pred, mask
         return loss, pred, mask
 
 
@@ -790,7 +795,6 @@ class 自监督重建OCTA图像(nn.Module):
         # （batchsize，patch总数base=196，path平方x通道数也就是每个patch块内的数据）->（图像宽高，通道数，hxp=patch[0]xp的宽高）
         return imgs
 
-    # TODO 随机掩码函数，很重要
     def 随机掩码(self, x, 掩码率):
         """
         Perform per-sample random masking by per-sample shuffling.
@@ -829,7 +833,6 @@ class 自监督重建OCTA图像(nn.Module):
         x = x + self.位置嵌入向量[:, 1:, :] # 从1开始是因为0对应cls_token，但是当前还加上去
 
         # masking: length -> length * 掩码率。
-        # TODO 关键操作
         x, mask, ids_restore = self.随机掩码(x, 掩码率)
 
         # append cls token
@@ -892,8 +895,9 @@ class 自监督重建OCTA图像(nn.Module):
         # img是原始且未分割的图片
         latent, mask, ids_restore = self.forward_encoder(imgs, 掩码率)
         pred = self.forward_decoder(latent, ids_restore)  # [批量, L, p*p*3]
-        loss = self.forward_loss(imgs, pred, mask)
-        return loss, pred, mask
+        # loss = self.forward_loss(imgs, pred, mask)
+        return pred, mask
+        # return loss, pred, mask
 
 
 
