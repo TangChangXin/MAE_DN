@@ -57,7 +57,7 @@ def 训练模型(融合图像模型, 重建图像模型, 优化器, 硬件设备
     # TODO 可能需要两个不同的损失函数。虽然都是mse
     # 重建立体图像损失函数, 重建融合图像损失函数 = 命令行参数.loss1, 命令行参数.loss2
 
-    损失函数 = torch.nn.MSELoss().to(硬件设备)
+    # 损失函数 = torch.nn.MSELoss().to(硬件设备)
 
     for 当前训练周期 in range(1, 命令行参数.max_epoch):
         融合图像模型.train() # 开始训练
@@ -82,15 +82,17 @@ def 训练模型(融合图像模型, 重建图像模型, 优化器, 硬件设备
             拼接图像.to(硬件设备)
             # 预测值, 掩码 = 重建图像模型(拼接图像)
             损失, 预测值, 掩码 = 重建图像模型(拼接图像) # 二维自监督训练阶段
-            print(1)
+            # TODO 测试不适用自动混合精度训练
+            # print(1)
 
-            # 优化器.zero_grad()
-            # 每名患者训练损失.backward()
-            # 优化器.step()
+            优化器.zero_grad()
+            损失.backward()
+            优化器.step()
+            当前训练周期全部损失 += 损失.detach().item()
             # 当前训练周期全部损失 += 每名患者训练损失.detach().item()
             # 当前训练周期全部损失 += 训练损失.detach().item()
-            # 训练循环.set_description(f'训练周期 [{当前训练周期}/{命令行参数.max_epoch}]')  # 设置进度条标题
-            # 训练循环.set_postfix(训练损失 = 每名患者训练损失.detach().item())  # 每一批训练都更新损失
+            训练循环.set_description(f'训练周期 [{当前训练周期}/{命令行参数.max_epoch}]')  # 设置进度条标题
+            训练循环.set_postfix(训练损失 = 损失.detach().item())  # 每一批训练都更新损失
 
 
 if __name__ == '__main__':
