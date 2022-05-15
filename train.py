@@ -54,7 +54,7 @@ else:
 # 硬件设备 = torch.device("cpu")
 print("训练使用设备", 硬件设备)
 
-def 训练模型(网络模型, 优化器, 硬件设备, 命令行参数):
+def 训练模型(融合图像模型, 重建图像模型, 优化器, 硬件设备, 命令行参数):
     OCTA_3M图像路径字典, OCTA_6M图像路径字典 = DataProcess.读数据集图像路径('../Dataset/UnlabeledTrainDataset')
     # OCTA立体数据尺寸, 图像块尺寸 = [240, 304, 304], [240, 76, 76]
     OCTA立体数据尺寸, 图像块尺寸 = 命令行参数.volume_data_size, 命令行参数.block_size
@@ -67,90 +67,47 @@ def 训练模型(网络模型, 优化器, 硬件设备, 命令行参数):
     # TODO 可能需要两个不同的损失函数。虽然都是mse
     # 重建立体图像损失函数, 重建融合图像损失函数 = 命令行参数.loss1, 命令行参数.loss2
 
-    损失函数 = torch.nn.MSELoss().to(硬件设备)
+    # 损失函数 = torch.nn.MSELoss().to(硬件设备)
 
     for 当前训练周期 in range(1, 命令行参数.max_epoch):
-        网络模型.train() # 开始训练
+        融合图像模型.train() # 开始训练
+        重建图像模型.train()
         当前训练周期全部损失 = 0
         训练循环 = tqdm(enumerate(立体图像训练数据), total=len(立体图像训练数据), ncols=130, colour='#d33682',leave=True)
-        # 当前患者索引 = -1
-        #    批量   C  D    H    W
-        # [病人索引, :, :, 0:76, 0:76]
-        # 图像排列的时候，第一张对应W维度的0，然后依次排列，最后一张对应303或者399。H维度对应的是原二维图像的宽度。
-        # 目前每名患者划分为16个图像块，每个图像块先后送入模型训练，输出为每个图像块的融合结果，然后将16个融合结果拼起来得到每个病人的立体图像数据的融合结果。
-        # 每名患者全部图像块的形状 torch.Size([1, 361, 2, 256, 16, 16])
+        # 目前每名患者划分为若干图像块，每个图像块先后送入模型训练，输出为每个图像块的融合结果，然后将若干融合结果拼起来得到每个病人的立体图像数据的融合结果。
+        # 每名患者全部图像块的形状 torch.Size([批量, 块数量, 通道(模态), 深度, 块大小, 块大小])
         for 训练批次, 每名患者全部图像块 in 训练循环:
             每名患者训练损失 = torch.tensor(0, dtype=torch.float32).to(硬件设备) # 每名患者的训练损失初始为张量形式的0，不然调用backward()报错
             # 每名患者的所有图像块算完之后再计算损失并反向传播然后更新。
-            # 这里定义一个量用来保存融合图像
-            # todo 定义一个列表保存融合图像
-            # 拼接图像 = torch.tensor([])
-            拼接图像 = []
+            拼接图像 = torch.tensor([]).to(硬件设备) # 创建一个空张量用来保存拼接图像
             for 每个图像块 in 每名患者全部图像块:
-                每个图像块 = torch.div(每个图像块, 255) #
+                每个图像块 = torch.div(每个图像块, 255) # 类似transforms.ToTensor()。除以255，归一化到[0.0, 1.0]的范围内
+                每个图像块 = transforms.Normalize(0.5, 0.5, inplace=True)(每个图像块) # 均值0.5，标准差0.5
                 每个图像块 = 每个图像块.to(硬件设备)
-                融合图像 = 网络模型(每个图像块)
-
-                # 拼接图像.append(融合图像) # 这里要把输出的融合图像拼接起来，现在不直接拼成一张完整的图，直接以列表形式保存。
-
-                # print(融合图像)
-                # 融合图像, 重建图像 = 网络模型(每个图像块) # 输出是
-
-                # 每名患者训练损失 += 损失函数(重建图像, 每个图像块)  # 图像块的损失累加
-
-                # 融合图像 = 网络模型(每个图像块) # 输出是
+                融合图像 = 融合图像模型(每个图像块) # 融合图像形状[1*16*16]
+                拼接图像 = torch.cat((拼接图像, 融合图像), dim=0) # 这里要把输出的融合图像拼接起来，现在不直接拼成一张完整的图，直接以列表形式保存。
+                # 融合图像, 重建图像 = 融合图像模型(每个图像块) # 输出是
                 # 每名患者训练损失 += 损失函数(融合图像, 每个图像块) # 图像块的损失累加
-
-            # print(1)
+            拼接图像 = torch.unsqueeze(拼接图像, 0) # 最终形状[批量, 图像块数量, 块大小, 块大小]
             # 拼接图像.to(硬件设备)
+            # 预测值, 掩码 = 重建图像模型(拼接图像)
+            损失, 预测值, 掩码 = 重建图像模型(拼接图像) # 二维自监督训练阶段
+            # TODO 测试不适用自动混合精度训练
+            # eps <= 1e-8 的情况在半精度下直接默认为0的，所以混合精度会产生NAN。可以将eps调整到大于1e - 7
+            # print(1)
 
-            # TODO 如何拼接输出的融合图像构成一张OCTA图像，作为后续自监督的输入
-            # 优化器.zero_grad()
-            # 每名患者训练损失.backward()
-            # 优化器.step()
+            优化器.zero_grad()
+            损失.backward()
+            优化器.step()
+            当前训练周期全部损失 += 损失.detach().item()
             # 当前训练周期全部损失 += 每名患者训练损失.detach().item()
             # 当前训练周期全部损失 += 训练损失.detach().item()
-            # 训练循环.set_description(f'训练周期 [{当前训练周期}/{命令行参数.max_epoch}]')  # 设置进度条标题
-            # 训练循环.set_postfix(训练损失 = 每名患者训练损失.detach().item())  # 每一批训练都更新损失
-
-
-def train_one_epoch(model, optimizer, data_loader, device, epoch):
-    model.train()
-    loss_function = torch.nn.CrossEntropyLoss()
-    accu_loss = torch.zeros(1).to(device)  # 累计损失
-    accu_num = torch.zeros(1).to(device)   # 累计预测正确的样本数
-    optimizer.zero_grad()
-
-    sample_num = 0
-    data_loader = tqdm(data_loader, file=sys.stdout)
-    for step, data in enumerate(data_loader):
-        images, labels = data
-        sample_num += images.shape[0]
-
-        pred = model(images.to(device))
-        pred_classes = torch.max(pred, dim=1)[1]
-        accu_num += torch.eq(pred_classes, labels.to(device)).sum()
-
-        loss = loss_function(pred, labels.to(device))
-        loss.backward()
-        accu_loss += loss.detach()
-
-        data_loader.desc = "[train epoch {}] loss: {:.3f}, acc: {:.3f}".format(epoch,
-                                                                               accu_loss.item() / (step + 1),
-                                                                               accu_num.item() / sample_num)
-
-        if not torch.isfinite(loss):
-            print('WARNING: non-finite loss, ending training ', loss)
-            sys.exit(1)
-
-        optimizer.step()
-        optimizer.zero_grad()
-
-    return accu_loss.item() / (step + 1), accu_num.item() / sample_num
+            训练循环.set_description(f'训练周期 [{当前训练周期}/{命令行参数.max_epoch}]')  # 设置进度条标题
+            训练循环.set_postfix(训练损失 = 损失.detach().item())  # 每一批训练都更新损失
 
 
 if __name__ == '__main__':
-    网络模型 = model.融合网络无cls()
-    网络模型.to(硬件设备)
-    优化器 = torch.optim.Adam(网络模型.parameters())
-    训练模型(网络模型, 优化器, 硬件设备, 无标签训练命令行参数)
+    立体网络模型, 平面重建模型 = model.融合网络无cls(), model.直接自监督重建OCTA图像()
+    立体网络模型.to(硬件设备), 平面重建模型.to(硬件设备)
+    优化器 = torch.optim.Adam(立体网络模型.parameters())
+    训练模型(立体网络模型, 平面重建模型, 优化器, 硬件设备, 无标签训练命令行参数)
