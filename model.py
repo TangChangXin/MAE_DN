@@ -2,9 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from functools import partial
-from collections import OrderedDict
 from torchsummary import summary
-from tensorboardX import SummaryWriter
 
 '''
 B站论文解说：MAE中掩码的部分也是要经过处理后成为嵌入向量的？不是直接分块后遮盖住就不管的。
@@ -61,27 +59,20 @@ class DropPath(nn.Module):
         return drop_path(x, self.drop_prob, self.training)
 
 
-class 立体图像块嵌入(nn.Module):
+class 三维图像块嵌入(nn.Module):
     """
-    如何将2维和3维整合在一起。3维输入的应该是
-    现在认为输入的图像都是已经划分成图像块之后的结果。有监督训练的时候在另一个类里对有标签的图像划分。
+    现在认为输入的图像都是已经划分成图像块之后的结果。
     """
-    def __init__(self, 图像形状, 图像块嵌入向量的维度):
-        r"""
-        加if分支处理3维和2维的区别
-        输入通道数暂时没用到，有监督训练时如何对输入的图像划分
-        3维输入数据形状BCDHW 1*2*256*16*16，在256中随机选取部分用来训练，输出1*256的向量，然后整形为1*16*16或者是16*16。
+    def __init__(self,图像块嵌入向量的维度):
+        """
+        3维输入数据形状BCDHW 1*2*256*16*16，在256中随机选取部分用来训练，输出1*256的向量，然后整形为1*16*16。
 
-        :param 图像形状:
         :param 图像块嵌入向量的维度:
         """
         # todo 现在是3维为例
-        super(立体图像块嵌入, self).__init__()
-        self.图像形状 = 图像形状
+        super().__init__()
         self.图像块的大小 = 16
-        self.图像块数量 = 256 # TODO 注意修改
         self.标准化 = nn.LayerNorm(图像块嵌入向量的维度)
-        # self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity() 原代码
 
     def forward(self, x):
         # 输入1*2*256*16*16，展平后1*2*256*256。形状[B, C, D, H, W] -> [B, C, D , HW].交换维度后，1*256*256*2，形状[B, D, HW, C]
@@ -201,10 +192,75 @@ class 编码块(nn.Module):
         return x
 
 
-class 融合网络无cls(nn.Module):
+class 无重建融合网络(nn.Module):
     # TODO 注意深度和头数量
-    def __init__(self, 图像形状=304, 图像块大小=16, 输入通道数=3, 嵌入向量维度=512, 深度=1, 注意力头数量=2, 多层感知机扩增率=4.0,
-                 qkv_偏差=True, 全连接丢弃率=0., 自注意力丢弃率=0., drop_path_ratio=0., 图像嵌入层=立体图像块嵌入, 标准化=None,):
+    def __init__(self, 嵌入向量维度=512, 图像深度=256, 图像块大小=16, 掩码率=0.4, 深度=1, 注意力头数量=2, 多层感知机扩增率=4.0,
+                 qkv_偏差=True, 全连接丢弃率=0., 自注意力丢弃率=0., drop_path_ratio=0., 图像嵌入层=三维图像块嵌入, 标准化=None,):
+        """
+
+        :param 图像块大小:
+        :param 嵌入向量维度: (int) 大小为图像块的宽度乘高度再乘2。也可以自己通过卷积输出通道数来指定。
+        :param 深度: transformer编码器重复的次数。
+        :param 注意力头数量: (int): 必须是嵌入向量维度的因数。
+        :param 多层感知机扩增率: (int): 多层感知机模块中第一个全连接层的隐藏层节点数目和嵌入向量维度的比值
+        :param qkv_偏差:
+        :param 全连接丢弃率:
+        :param 自注意力丢弃率: 多头自注意力中输出经过softmax层之后的dropout层的丢弃率。
+        :param drop_path_ratio:
+        :param 图像嵌入层: (nn.Module): 将图像划分成若干块之后生成嵌入向量
+        :param 标准化:
+        """
+        super().__init__()
+        self.图像块大小 = 图像块大小
+        self.num_features = 嵌入向量维度  # num_features for consistency with other models
+        标准化 = 标准化 or partial(nn.LayerNorm, eps=1e-6)
+        self.图像块嵌入向量 = 图像嵌入层(嵌入向量维度)
+        图像块数量 = self.图像块嵌入向量.图像块数量
+
+        # 第一个维度的1对应的是批量
+        self.位置嵌入向量 = nn.Parameter(torch.zeros(1, 图像块数量, 嵌入向量维度))
+        self.位置嵌入丢弃 = nn.Dropout(p=全连接丢弃率) # 加上位置嵌入向量之后的drop层
+
+        # 构建了一个等差数列，保存后续transformer编码块中的drop率。最后一个transformer编码块需要令输出形状为1*256，方便调整为16*16
+        丢弃率 = [x.item() for x in torch.linspace(0, drop_path_ratio, 深度)]  # stochastic depth decay rule
+        # transformer编码块重复指定的次数
+        self.编码块堆叠 = nn.Sequential(*[
+            编码块(特征维度=嵌入向量维度, 注意力头数量=注意力头数量, 多层感知机扩增率=多层感知机扩增率, qkv_偏差=qkv_偏差,
+                自注意力丢弃率=自注意力丢弃率, 全连接层丢弃率=全连接丢弃率, drop_path_ratio=丢弃率[i], 标准化=标准化)
+            for i in range(深度)
+        ])
+        self.标准化 = 标准化(嵌入向量维度) # 在所有的transformer编码块之后的LN层。输出形状[1, 256， 512]
+        self.通道融合 = nn.Linear(嵌入向量维度, 256) # 输出形状[1, 256， 256]
+        self.激活函数 = nn.GELU()
+        # TODO 这里可能需要修改
+        self.特征降维 = nn.Linear(256, 1) # pytorch如何对指定维度的信息进行融合
+
+        # 权重初始化
+        nn.init.trunc_normal_(self.位置嵌入向量, std=0.02)
+        self.apply(权重初始化)
+
+    def forward(self, x, 掩码率=0.4):
+        # [B, C, D, H, W] -> [批量, 图像块数量, 嵌入向量维度] 我的图像深度相当于图像块数量
+        # 得到图像块对应的嵌入向量
+        x = self.图像块嵌入向量(x)  # 输出形状[B, 256, 512]
+        # 这里报错说明实际输入的嵌入向量维度和参数传入的嵌入向量维度大小不一致。
+        x = self.位置嵌入丢弃(x + self.位置嵌入向量) # 加上位置嵌入信息，准备输入transformer编码器
+        x, mask, ids_restore = 随机掩码(x, 掩码率) #
+        x = self.编码块堆叠(x)
+        x = self.标准化(x) # 输出形状[批量, 块数量， 维度]
+        x = self.通道融合(x) # 输出形状[批量, 块数量， 维度]
+        x = self.激活函数(x)
+        x = torch.transpose(x, 1, 2)
+        x = self.特征降维(x) # 输出形状[批量, 维度， 1]
+        x = torch.reshape(x, (-1, self.图像块大小, self.图像块大小)) # 输出形状[批量, 图像块大小, 图像块大小]。考虑批量维度方便输入真实数据
+        # print(x.shape)
+        return x
+
+
+class 有重建融合网络(nn.Module):
+    # TODO 注意深度和头数量
+    def __init__(self, 嵌入向量维度, 图像形状=304, 图像块大小=16, 输入通道数=3, 深度=1, 注意力头数量=2, 多层感知机扩增率=4.0,
+                 qkv_偏差=True, 全连接丢弃率=0., 自注意力丢弃率=0., drop_path_ratio=0., 图像嵌入层=三维图像块嵌入, 标准化=None,):
         """
 
         :param 图像块大小:
@@ -220,10 +276,10 @@ class 融合网络无cls(nn.Module):
         :param 图像嵌入层: (nn.Module): 将图像划分成若干块之后生成嵌入向量
         :param 标准化:
         """
-        super(融合网络无cls, self).__init__()
+        super().__init__()
         self.num_features = 嵌入向量维度  # num_features for consistency with other models
         标准化 = 标准化 or partial(nn.LayerNorm, eps=1e-6)
-        self.图像块嵌入向量 = 图像嵌入层(图像形状=图像形状, 图像块嵌入向量的维度=嵌入向量维度)
+        self.图像块嵌入向量 = 图像嵌入层(图像块嵌入向量的维度=嵌入向量维度)
         图像块数量 = self.图像块嵌入向量.图像块数量
 
         # 第一个维度的1对应的是批量
@@ -264,141 +320,8 @@ class 融合网络无cls(nn.Module):
         # print(x.shape)
         return x
 
-'''
-class 融合网络(nn.Module):
-    def __init__(self, 图像大小=224, 图像块大小=16, 输入通道数=3, 分类数目=1000,
-                 嵌入向量维度=512, 深度=12, 注意力头数量=8, 多层感知机扩增率=4.0, qkv_偏差=True,
-                 qk_缩小因子=None, representation_size=None, 蒸馏=False, 全连接丢弃率=0.,
-                 自注意力丢弃率=0., drop_path_ratio=0., 图像嵌入层=立体图像块嵌入, 标准化=None,):
-        """
 
-        :param 图像大小:
-        :param 图像块大小:
-        :param 输入通道数: 卷积生成图像块时用到
-        :param 分类数目:
-        :param 嵌入向量维度: (int) 大小为图像块的宽度乘高度再乘2。也可以自己通过卷积输出通道数来指定。
-        :param 深度: transformer编码器重复的次数。
-        :param 注意力头数量: (int): 必须是嵌入向量维度的因数。
-        :param 多层感知机扩增率: (int): 多层感知机模块中第一个全连接层的隐藏层节点数目和嵌入向量维度的比值
-        :param qkv_偏差:
-        :param qk_缩小因子:
-        :param representation_size:
-        :param 蒸馏: (bool): model includes a distillation token and head as in DeiT models # TODO 蒸馏Vit模型
-        :param 全连接丢弃率:
-        :param 自注意力丢弃率: 多头自注意力中输出经过softmax层之后的dropout层的丢弃率。
-        :param drop_path_ratio:
-        :param 图像嵌入层: (nn.Module): 将图像划分成若干块之后生成嵌入向量
-        :param 标准化:
-        """
-        """
-        Args:
-            qk_scale (float): override default qk scale of head_dim ** -0.5 if set
-            # TODO representation_size 对应最后进行分类时的MLP分类头，None表示没有
-            representation_size (Optional[int]): enable and set representation layer (pre-logits) to this value if set
-            distilled (bool): model includes a distillation token and head as in DeiT models # TODO 蒸馏Vit模型
-            drop_ratio (float): dropout rate
-            attn_drop_ratio (float): attention dropout rate
-            drop_path_ratio (float): stochastic depth rate
-            embed_layer (nn.Module): patch embedding layer
-            norm_layer: (nn.Module): normalization layer
-        """
-        super(融合网络, self).__init__()
-        self.num_features = self.embed_dim = 嵌入向量维度  # num_features for consistency with other models
-        self.num_tokens = 2 if 蒸馏 else 1
-        标准化 = 标准化 or partial(nn.LayerNorm, eps=1e-6)
-        self.图像块嵌入向量 = 图像嵌入层(图像形状=304, 图像块嵌入向量的维度=嵌入向量维度)
-        图像块数量 = self.图像块嵌入向量.图像块数量
-
-        # 第一个维度的1对应的是批量
-        self.分类嵌入向量 = nn.Parameter(torch.zeros(1, 1, 嵌入向量维度))
-        self.dist_token = nn.Parameter(torch.zeros(1, 1, 嵌入向量维度)) if 蒸馏 else None
-        # 位置嵌入是随机生成的？
-        # TODO
-        # self.位置嵌入向量 = nn.Parameter(torch.zeros(1, 图像块数量 + self.num_tokens, 嵌入向量维度))
-        self.位置嵌入向量 = nn.Parameter(torch.zeros(1, 图像块数量 + self.num_tokens, 嵌入向量维度))
-        self.位置嵌入丢弃 = nn.Dropout(p=全连接丢弃率) # 加上位置嵌入向量之后的drop层
-
-        # 构建了一个等差数列，保存后续transformer编码块中的drop率。最后一个transformer编码块需要令输出形状为1*256，方便调整为16*16
-        丢弃率 = [x.item() for x in torch.linspace(0, drop_path_ratio, 深度)]  # stochastic depth decay rule
-        # transformer编码块重复指定的次数
-        self.编码块堆叠 = nn.Sequential(*[
-            编码块(特征维度=嵌入向量维度, 注意力头数量=注意力头数量, 多层感知机扩增率=多层感知机扩增率, qkv_偏差=qkv_偏差, qk_缩小因子=qk_缩小因子,
-                自注意力丢弃率=自注意力丢弃率, 全连接层丢弃率=全连接丢弃率, drop_path_ratio=丢弃率[i], 标准化=标准化)
-            for i in range(深度)
-        ])
-        self.标准化 = 标准化(嵌入向量维度) # 在所有的transformer编码块之后的LN层
-
-        # Representation layer
-        # """
-        if representation_size and not 蒸馏:
-            self.num_features = representation_size
-            self.pre_logits = nn.Sequential(OrderedDict([
-                ("全连接层", nn.Linear(嵌入向量维度, representation_size)),
-                ("激活函数", nn.Tanh())
-            ]))
-        else:
-            self.pre_logits = nn.Identity()
-        # """
-
-        # Classifier head(s)
-        # """
-        self.head = nn.Linear(self.num_features, 分类数目) if 分类数目 > 0 else nn.Identity()
-        self.head_dist = None
-        if 蒸馏:
-            self.head_dist = nn.Linear(嵌入向量维度, self.分类数目) if 分类数目 > 0 else nn.Identity()
-        # """
-
-        # 权重初始化 Weight init
-        nn.init.trunc_normal_(self.位置嵌入向量, std=0.02)
-        if self.dist_token is not None:
-            nn.init.trunc_normal_(self.dist_token, std=0.02)
-        nn.init.trunc_normal_(self.分类嵌入向量, std=0.02)
-        self.apply(权重初始化)
-
-
-    # def forward_features(self, x):
-    def forward(self, x):
-        # [B, C, H, W] -> [B, num_patches, embed_dim]
-        # 得到图像块对应的嵌入向量
-        x = self.图像块嵌入向量(x)  # [B, 196, 768] [B, 256, 512]
-        # [1, 1, 768] -> [B, 1, 768]
-        分类嵌入向量 = self.分类嵌入向量.expand(x.shape[0], -1, -1)
-        # print(分类嵌入向量.shape)
-        if self.dist_token is None:
-            # 默认情况。拼接分类嵌入向量和x
-            x = torch.cat((分类嵌入向量, x), dim=1)  # [B, 197, 768]
-        else:
-            x = torch.cat((分类嵌入向量, self.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
-
-        # 这里报错说明实际输入的嵌入向量维度和参数传入的嵌入向量维度大小不一致。
-        x = self.位置嵌入丢弃(x + self.位置嵌入向量) # 加上位置嵌入信息，准备输入transformer编码器
-        x = self.编码块堆叠(x)
-        x = self.标准化(x)
-        return x
-        # 下面似乎是和具体的分类任务相关的
-        # if self.dist_token is None:
-        #     return self.pre_logits(x[:, 0])
-        # else:
-        #     return x[:, 0], x[:, 1]
-
-    # 下面计算中出错
-    """
-    def forward(self, x):
-        x = self.forward_features(x)
-        if self.head_dist is not None:
-            x, x_dist = self.head(x[0]), self.head_dist(x[1])
-            if self.training and not torch.jit.is_scripting():
-                # during inference, return the average of both classifier predictions
-                return x, x_dist
-            else:
-                return (x + x_dist) / 2
-        else:
-            x = self.head(x)
-        return x
-    """
-'''
-
-class 平面图像块嵌入(nn.Module):
+class 二维图像块嵌入(nn.Module):
     """
     如何将2维和3维整合在一起。3维输入的应该是
     现在认为输入的图像都是已经划分成图像块之后的结果。有监督训练的时候在另一个类里对有标签的图像划分。
@@ -413,7 +336,7 @@ class 平面图像块嵌入(nn.Module):
         :param 图像块嵌入向量的维度:
         """
         # todo 现在是3维为例
-        super(平面图像块嵌入, self).__init__()
+        super().__init__()
         self.图像形状 = 图像形状
         self.图像块的大小 = 16
         self.图像块数量 = 256 # TODO 注意修改
@@ -465,12 +388,42 @@ class 直接平面图像块嵌入(nn.Module):
         return x
 
 
+def 随机掩码(x, 掩码率):
+    """
+    随着遮盖部分图像块
+    x: [批量, 块数量, 嵌入向量维度]
+    """
+
+    批量, 块数量, 嵌入向量维度 = x.shape  # 获取输入数据的形状，批量, 块数量, 维度
+    保留块数量 = int(块数量 * (1 - 掩码率))
+    noise = torch.rand(批量, 块数量, device=x.device)  # 二维随机噪声矩阵，数值在[0, 1]
+
+    # sort noise for each sample。argsort()返回的是元素对应的索引
+    # ids_shuffle是用来选择哪些元素做掩码
+    ids_shuffle = torch.argsort(noise, dim=1)  # 升序排列ascend: small is keep, large is remove
+    # ids_restore是用于在编码之后对图像块的顺序进行还原并输入解码器？
+    ids_restore = torch.argsort(ids_shuffle, dim=1) # 对上一步得到的索引排序
+
+    # keep the first subset
+    ids_keep = ids_shuffle[:, :保留块数量]
+    # 没有被掩码的图像块序列？
+    x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, 嵌入向量维度))
+
+    # generate the binary mask: 0 is keep, 1 is remove
+    #
+    mask = torch.ones([批量, 块数量], device=x.device)
+    mask[:, :保留块数量] = 0
+    # unshuffle to get the binary mask
+    mask = torch.gather(mask, dim=1, index=ids_restore)
+    return x_masked, mask, ids_restore
+
+
 class 直接自监督重建OCTA图像(nn.Module):
     """
     现在考虑传进来的数据是已经划分块之后的结果，图像是单通道
     """
-    def __init__(self, 图像形状=224, 图像块大小=16, 嵌入向量维度=256, 深度=1, 注意力头数量=2, 解码器嵌入向量维度=256, 解码器深度=8,
-                 解码器注意力头数量=16, 多层感知机扩增率=4., 标准化=nn.LayerNorm, norm_pix_loss=False):
+    def __init__(self, 图像形状=224, 图像块大小=16, 嵌入向量维度=256, 深度=1, 注意力头数量=2, 解码器嵌入向量维度=256, 解码器深度=1,
+                 解码器注意力头数量=2, 多层感知机扩增率=4., 标准化=nn.LayerNorm, norm_pix_loss=False):
         super().__init__()
 
         # --------------------------------------------------------------------------
@@ -582,46 +535,15 @@ class 直接自监督重建OCTA图像(nn.Module):
         # （batchsize，patch总数base=196，path平方x通道数也就是每个patch块内的数据）->（图像宽高，通道数，hxp=patch[0]xp的宽高）
         return imgs
 
-    def 随机掩码(self, x, 掩码率):
-        """
-        Perform per-sample random masking by per-sample shuffling.
-        Per-sample shuffling is done by argsort random noise.
-        x: [批量, L, 嵌入向量维度], sequence
-        """
-
-        批量, 块数量, 嵌入向量维度 = x.shape  # 获取输入数据的形状，批量, 块数量, 维度
-        保留块数量 = int(块数量 * (1 - 掩码率))
-        noise = torch.rand(批量, 块数量, device=x.device)  # 二维随机噪声矩阵，数值在[0, 1]
-
-        # sort noise for each sample。argsort()返回的是元素对应的索引
-        # ids_shuffle是用来选择哪些元素做掩码
-        ids_shuffle = torch.argsort(noise, dim=1)  # 升序排列ascend: small is keep, large is remove
-        # ids_restore是用于在编码之后对图像块的顺序进行还原并输入解码器？
-        ids_restore = torch.argsort(ids_shuffle, dim=1) # 对上一步得到的索引排序
-
-        # keep the first subset
-        ids_keep = ids_shuffle[:, :保留块数量]
-        # 没有被掩码的图像块序列？
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, 嵌入向量维度))
-
-        # generate the binary mask: 0 is keep, 1 is remove
-        #
-        mask = torch.ones([批量, 块数量], device=x.device)
-        mask[:, :保留块数量] = 0
-        # unshuffle to get the binary mask
-        mask = torch.gather(mask, dim=1, index=ids_restore) #
-
-        return x_masked, mask, ids_restore
-
     def forward_encoder(self, x, 掩码率):
         # TODO 现在测试直接用已经分块的图像，不是真实图像再分块
         x = self.图像块嵌入向量(x) # 图像块转化为嵌入向量 [1*361*256]
 
-        # add pos embed w/o cls token
+        # 加上位置嵌入向量
         x = x + self.位置嵌入向量[:, 1:, :] # 从1开始是因为0对应cls_token
 
         # masking: length -> length * 掩码率。
-        x, mask, ids_restore = self.随机掩码(x, 掩码率)
+        x, mask, ids_restore = 随机掩码(x, 掩码率)
 
         # 添加分类嵌入向量
         分类嵌入 = self.分类嵌入 + self.位置嵌入向量[:, :1, :]
@@ -795,36 +717,6 @@ class 自监督重建OCTA图像(nn.Module):
         # （batchsize，patch总数base=196，path平方x通道数也就是每个patch块内的数据）->（图像宽高，通道数，hxp=patch[0]xp的宽高）
         return imgs
 
-    def 随机掩码(self, x, 掩码率):
-        """
-        Perform per-sample random masking by per-sample shuffling.
-        Per-sample shuffling is done by argsort random noise.
-        x: [批量, L, 嵌入向量维度], sequence
-        """
-
-        批量, 块数量, 嵌入向量维度 = x.shape  # 获取输入数据的形状，批量, 块数量, 维度
-        保留块数量 = int(块数量 * (1 - 掩码率))
-        noise = torch.rand(批量, 块数量, device=x.device)  # 二维随机噪声矩阵，数值在[0, 1]
-
-        # sort noise for each sample。argsort()返回的是元素对应的索引
-        # ids_shuffle是用来选择哪些元素做掩码
-        ids_shuffle = torch.argsort(noise, dim=1)  # 升序排列ascend: small is keep, large is remove
-        # ids_restore是用于在编码之后对图像块的顺序进行还原并输入解码器？
-        ids_restore = torch.argsort(ids_shuffle, dim=1) # 对上一步得到的索引排序
-
-        # keep the first subset
-        ids_keep = ids_shuffle[:, :保留块数量]
-        # 没有被掩码的图像块序列？
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, 嵌入向量维度))
-
-        # generate the binary mask: 0 is keep, 1 is remove
-        #
-        mask = torch.ones([批量, 块数量], device=x.device)
-        mask[:, :保留块数量] = 0
-        # unshuffle to get the binary mask
-        mask = torch.gather(mask, dim=1, index=ids_restore)
-        return x_masked, mask, ids_restore
-
     def forward_encoder(self, x, 掩码率):
         # TODO 现在测试直接用已经分块的图像，不是真实图像再分块
         x = self.图像块嵌入向量(x) # 图像块转化为嵌入向量 [1*361*256]
@@ -833,7 +725,7 @@ class 自监督重建OCTA图像(nn.Module):
         x = x + self.位置嵌入向量[:, 1:, :] # 从1开始是因为0对应cls_token，但是当前还加上去
 
         # masking: length -> length * 掩码率。
-        x, mask, ids_restore = self.随机掩码(x, 掩码率)
+        x, mask, ids_restore = 随机掩码(x, 掩码率)
 
         # append cls token
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
@@ -1180,14 +1072,6 @@ def mae_vit_base_patch16_dec512d8b(**kwargs):
 mae_vit_base_patch16 = mae_vit_base_patch16_dec512d8b  # decoder: 512 dim, 8 blocks
 
 
-
-
-
-
-
-
-
-
 def 权重初始化(模块):
     """
     ViT 权重初始化
@@ -1243,7 +1127,7 @@ if __name__ == '__main__':
     #     可视化.add_graph(测试模型, torch.randn(1, 2, 256, 16, 16))
 
 
-    测试模型 = 平面图像块嵌入(304, 512) # 输出[3, 256, 512]
+    测试模型 = 二维图像块嵌入(304, 512) # 输出[3, 256, 512]
     测试模型.to(torch.device('cuda:0'))
     print('\n')
     summary(测试模型, input_size=(1, 304, 304), batch_size=1, device='cuda')
