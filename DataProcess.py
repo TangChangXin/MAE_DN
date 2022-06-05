@@ -2,7 +2,6 @@ import os
 import numpy as np
 from PIL import Image
 import h5py
-import torch
 import natsort
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
@@ -96,9 +95,9 @@ class OCTA3D数据集_未关闭(Dataset):
         # CDHW，即通道数、深度、高度、宽度                         C            D              H             W
         self.全部图像数据集合 = np.zeros((self.患者数量, self.图像模态种类, 立体数据尺寸[0], 立体数据尺寸[1], 立体数据尺寸[2]), dtype=np.uint8)
         if self.立体数据尺寸[1] == 304:
-            self.图像数据集合名称 = "Depth64_OCTA_3M_3D_Data"  # 3M对应大小304
+            self.图像数据集合名称 = "OCTA_3M_3D_Data"  # 3M对应大小304
         else:
-            self.图像数据集合名称 = "Depth64_OCTA_6M_6D_Data"  # 6M对应大小400
+            self.图像数据集合名称 = "OCTA_6M_6D_Data"  # 6M对应大小400
         # 如果不存在数据。
         if not os.path.exists(os.path.join(self.保存路径, self.图像数据集合名称 + '.hdf5')):
             print("生成OCTA图像数据集。")
@@ -173,9 +172,9 @@ class 低显存OCTA3D数据集(Dataset):
         # CDHW，即通道数、深度、高度、宽度                         C            D              H             W
         self.全部图像数据集合 = np.zeros((self.患者数量, self.图像模态种类, 立体数据尺寸[0], 立体数据尺寸[1], 立体数据尺寸[2]), dtype=np.uint8)
         if self.立体数据尺寸[1] == 304:
-            self.图像数据集合名称 = "Depth64_OCTA_3M_3D_Data"  # 3M对应大小304
+            self.图像数据集合名称 = "OCTA_3M_3D_Data"  # 3M对应大小304
         else:
-            self.图像数据集合名称 = "Depth64_OCTA_6M_6D_Data"  # 6M对应大小400
+            self.图像数据集合名称 = "OCTA_6M_6D_Data"  # 6M对应大小400
         # 如果不存在数据。
         if not os.path.exists(os.path.join(self.保存路径, self.图像数据集合名称 + '.hdf5')):
             print("生成OCTA图像数据集。")
@@ -202,7 +201,6 @@ class 低显存OCTA3D数据集(Dataset):
             print("OCTA图像数据集已存在！")
 
     def 划分立体图像(self, 病人索引, 立体图像数据):
-        # TODO 目前在高度方向上没有划分，后续进行transformer可能需要高度上划分
         # 图像块数量 = (self.立体数据尺寸[1] // self.块尺寸[1]) ** 2
         图像块列表 = [] # 以304为例 每名患者数据划分后形状[361, 2, 256, 16, 16]
         if self.立体数据尺寸[1] == 304:

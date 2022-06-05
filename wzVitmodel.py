@@ -190,7 +190,8 @@ class VisionTransformer(nn.Module):
                  attn_drop_ratio=0., drop_path_ratio=0., embed_layer=PatchEmbed, norm_layer=None,
                  act_layer=None):
         """
-        Args:            img_size (int, tuple): input image size
+        Args:
+            img_size (int, tuple): input image size
             patch_size (int, tuple): patch size
             in_c (int): number of input channels
             num_classes (int): number of classes for classification head

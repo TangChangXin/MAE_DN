@@ -1,6 +1,7 @@
 import sys, os, math, argparse, torch, random
 # import torch.optim as optim
 # import torch.optim.lr_scheduler as lr_scheduler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
@@ -55,6 +56,7 @@ else:
 print("训练使用设备", 硬件设备)
 
 def 训练模型(融合图像模型, 重建图像模型, 优化器, 硬件设备, 命令行参数):
+    训练记录器1 = SummaryWriter()
     OCTA_3M图像路径字典, OCTA_6M图像路径字典 = DataProcess.读数据集图像路径('../Dataset/UnlabeledTrainDataset')
     # OCTA立体数据尺寸, 图像块尺寸 = [240, 304, 304], [240, 76, 76]
     OCTA立体数据尺寸, 图像块尺寸 = 命令行参数.volume_data_size, 命令行参数.block_size
@@ -63,7 +65,7 @@ def 训练模型(融合图像模型, 重建图像模型, 优化器, 硬件设备
     # TODO 如何同时传入两个字典，但是在类的内部初始化的时候区分，并在后续使用的时候区分
     # OCTA3M数据集 = DataProcess.低显存OCTA3D数据集(OCTA_3M图像路径字典, OCTA立体数据尺寸, 图像块尺寸, OCTA模态类别, 患者样本数量, 数据保存路径)
     OCTA3M数据集 = DataProcess.OCTA3D数据集_未关闭(OCTA_3M图像路径字典, OCTA立体数据尺寸, 图像块尺寸, OCTA模态类别, 患者样本数量, 数据保存路径)
-    立体图像训练数据 = DataProcess.DataLoader(OCTA3M数据集, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
+    立体图像训练数据 = DataLoader(OCTA3M数据集, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
     # TODO 可能需要两个不同的损失函数。虽然都是mse
     # 重建立体图像损失函数, 重建融合图像损失函数 = 命令行参数.loss1, 命令行参数.loss2
 
@@ -89,10 +91,10 @@ def 训练模型(融合图像模型, 重建图像模型, 优化器, 硬件设备
                 # 融合图像, 重建图像 = 融合图像模型(每个图像块) # 输出是
                 # 每名患者训练损失 += 损失函数(融合图像, 每个图像块) # 图像块的损失累加
             拼接图像 = torch.unsqueeze(拼接图像, 0) # 最终形状[批量, 图像块数量, 块大小, 块大小]
-            # 拼接图像.to(硬件设备)
+            拼接图像.to(硬件设备)
             # 预测值, 掩码 = 重建图像模型(拼接图像)
             损失, 预测值, 掩码 = 重建图像模型(拼接图像) # 二维自监督训练阶段
-            # TODO 测试：不使用自动混合精度训练
+            # TODO 测试不适用自动混合精度训练
             # eps <= 1e-8 的情况在半精度下直接默认为0的，所以混合精度会产生NAN。可以将eps调整到大于1e - 7
             # print(1)
 
@@ -107,7 +109,9 @@ def 训练模型(融合图像模型, 重建图像模型, 优化器, 硬件设备
 
 
 if __name__ == '__main__':
-    立体网络模型, 平面重建模型 = model.融合网络无cls(), model.直接自监督重建OCTA图像()
+    # TODO 为了节约内存占用，目前只使用单头注意力，transformer块也是1。
+    嵌入向量维度 = 512
+    立体网络模型, 平面重建模型 = model.无重建融合网络(嵌入向量维度), model.直接自监督重建OCTA图像()
     立体网络模型.to(硬件设备), 平面重建模型.to(硬件设备)
     优化器 = torch.optim.Adam(立体网络模型.parameters())
     训练模型(立体网络模型, 平面重建模型, 优化器, 硬件设备, 无标签训练命令行参数)
